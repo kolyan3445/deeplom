@@ -13,7 +13,7 @@ SERIAL_CONFIG = {
     'timeout': 1
 }
 
-IMAGE_URL = 'http://192.168.0.107/'
+IMAGE_URL = 'http://192.168.0.115/'
 WINDOW_SIZE = (1000, 800)
 IMAGE_MAX_SIZE = (800, 600)
 
