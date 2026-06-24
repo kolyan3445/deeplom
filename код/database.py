@@ -1,100 +1,154 @@
 import mysql.connector
-from mysql.connector import Error
-from config import DB_CONFIG
-import json
-import base64
-import requests
-from io import BytesIO
-from PIL import Image
+from tkinter import messagebox
 
-def get_connection():
-    """Get DB connection."""
-    try:
-        conn = mysql.connector.connect(**DB_CONFIG)
-        if conn.is_connected():
-            return conn
-    except Error as e:
-        print(f"DB Error: {e}")
-        return None
+class DatabaseManager:
 
-def ensure_table():
-    """Create monitoring table if not exists."""
-    conn = get_connection()
-    if not conn:
-        return False
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS monitoring (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            first_time BIGINT,
-            first_temp FLOAT,
-            image_base64 LONGTEXT,
-            points_json TEXT
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin
-    """)
-    conn.commit()
-    cursor.close()
-    conn.close()
-    return True
+    def __init__(self, c):
+        
+        try:
+            self.connection = mysql.connector.connect(
+                host=c["mysql_host"],
+                port=c["mysql_port"],
+                user=c["mysql_user"],
+                password=c["mysql_password"],
+                database=c["mysql_database"]
+            )
 
-def list_sessions():
-    """List sessions: [(id, first_time, first_temp), ...]."""
-    conn = get_connection()
-    if not conn:
-        return []
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, first_time, first_temp FROM monitoring ORDER BY id DESC")
-    sessions = cursor.fetchall()
-    cursor.close()
-    conn.close()
-    return sessions
+            self.cursor = self.connection.cursor(
+                dictionary=True
+            )
 
-def save_session(points):
-    """Save session: first_time/temp/image_base64/points."""
-    if not points:
-        return None
-    first_point = points[0]
-    first_time = first_point['time']
-    first_temp = first_point['point']['temp']
-    points_json = json.dumps(points)
-    
-    # Get current image and base64 encode
-    try:
-        resp = requests.get(IMAGE_URL, timeout=5)
-        img = Image.open(BytesIO(resp.content))
-        img.thumbnail(IMAGE_MAX_SIZE, Image.Resampling.LANCZOS)
-        img_buffer = BytesIO()
-        img.save(img_buffer, format='PNG')
-        image_base64 = base64.b64encode(img_buffer.getvalue()).decode('ascii')
-    except:
-        image_base64 = ""
-    
-    conn = get_connection()
-    if not conn:
-        return None
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT INTO monitoring (first_time, first_temp, image_base64, points_json) VALUES (%s, %s, %s, %s)",
-        (first_time, first_temp, image_base64, points_json)
-    )
-    conn.commit()
-    session_id = cursor.lastrowid
-    cursor.close()
-    conn.close()
-    return session_id
+        except Exception as e:
+            from logger import logger
+            messagebox.showerror(title="Ошибка БД!", message="Ошибка подключения к базе данных! Проверьте запущен ли у вас MySQL или файл настроек settings.json!")
 
-def load_session(session_id):
-    """Load points and image_base64."""
-    conn = get_connection()
-    if not conn:
-        return []
-    cursor = conn.cursor()
-    cursor.execute("SELECT image_base64, points_json FROM monitoring WHERE id = %s", (session_id,))
-    result = cursor.fetchone()
-    cursor.close()
-    conn.close()
-    if result:
-        image_base64, points_json = result
-        return {'image_base64': image_base64, 'points': json.loads(points_json)}
-    return []
+            logger.error(e)
 
+    def create_session(self):
+
+        self.cursor.execute(
+            """
+            INSERT INTO sessions(created_at)
+            VALUES(NOW())
+            """
+        )
+
+        self.connection.commit()
+
+        return self.cursor.lastrowid
+
+    def get_sessions(self):
+
+        self.cursor.execute(
+            """
+            SELECT *
+            FROM sessions
+            ORDER BY id DESC
+            """
+        )
+
+        return self.cursor.fetchall()
+
+    def create_measurement(self,session_id,timestamp,image_path):
+
+        self.cursor.execute(
+            """
+            INSERT INTO measurements
+            (session_id, timestamp, image_path)
+            VALUES(%s,%s,%s)
+            """,
+            (session_id, timestamp, image_path))
+
+        self.connection.commit()
+        
+        return self.cursor.lastrowid
+
+    def insert_points(self, measurement_id, points):
+        rows = []
+
+        for p in points:
+            rows.append((measurement_id, p["x"], p["y"], p["temp"]))
+
+        self.cursor.executemany(
+            """
+            INSERT INTO temperature_points
+            (
+                measurement_id,
+                pos_x,
+                pos_y,
+                temperature
+            )
+            VALUES(%s,%s,%s,%s)
+            """, rows)
+
+        self.connection.commit()
+
+    def get_measurements(self, session_id):
+
+        self.cursor.execute(
+            """
+            SELECT *
+            FROM measurements
+            WHERE session_id=%s
+            ORDER BY timestamp DESC
+            """,
+            (session_id,))
+
+        return self.cursor.fetchall()
+
+    def get_points(self, measurement_id):
+
+        self.cursor.execute(
+            """
+            SELECT
+                pos_x,
+                pos_y,
+                temperature
+            FROM temperature_points
+            WHERE measurement_id=%s
+            """, (measurement_id,))
+
+        return self.cursor.fetchall()
+
+    def get_last_image(self, session_id):
+
+        self.cursor.execute(
+            """
+            SELECT image_path
+            FROM measurements
+            WHERE session_id=%s
+            ORDER BY timestamp DESC
+            LIMIT 1
+            """, (session_id,))
+
+        row = self.cursor.fetchone()
+
+        return (row["image_path"] if row else None)
+
+    def close(self):
+
+        try:
+            self.cursor.close()
+            self.connection.close()
+
+        except Exception:
+            pass
+
+    def get_session_points(self,session_id):
+
+        self.cursor.execute(
+            """
+            SELECT
+                m.id AS measurement_id,
+                m.timestamp,
+                p.pos_x,
+                p.pos_y,
+                p.temperature
+            FROM measurements m
+            JOIN temperature_points p
+                ON p.measurement_id = m.id
+            WHERE m.session_id=%s
+            ORDER BY m.timestamp
+            """,(session_id,))
+        
+        return self.cursor.fetchall()

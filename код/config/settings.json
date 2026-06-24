@@ -1,0 +1,8 @@
+{
+"esp32_ip":"192.168.4.1",
+"mysql_host":"localhost",
+"mysql_port":3306,
+"mysql_user":"root",
+"mysql_password":"fuckyou",
+"mysql_database":"thermal_monitor"
+}
